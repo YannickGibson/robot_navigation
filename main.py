@@ -11,6 +11,8 @@ class MessageSyntaxException(Exception):
     pass
 class ServerKeyOutOfRangeException(Exception):
     pass
+class LoginFailedException(Exception):
+    pass
 
 class Client(Thread): # Extend Thread class
     def __init__(self, soc):
@@ -67,8 +69,8 @@ class Client(Thread): # Extend Thread class
             self.send("107 KEY REQUEST")
         if order == 1:
             self.keyid = int(msg)
-            print(self.keyid, len(SERVER_KEYS) - 1)
             if self.keyid < 0 or self.keyid > len(SERVER_KEYS) - 1:
+                self.send("303 KEY OUT OF RANGE")
                 raise ServerKeyOutOfRangeException()	
             name_hash = self.get_asci_hash()
             mutual_hash = name_hash * 1000 % 65536
@@ -81,8 +83,8 @@ class Client(Thread): # Extend Thread class
             if self.client_hash == client_sent_hash:
                 self.send("200 OK")
             else:
-                raise ServerKeyOutOfRangeException()	
-                self.send("")
+                self.send("300 LOGIN FAILED")
+                raise LoginFailedException()
 
     def act(self, msg):
         if msg == "OK 0 0":
@@ -106,10 +108,13 @@ class Client(Thread): # Extend Thread class
             print("Connection Killed by us: Connection Timeout", e)
         except MessageSyntaxException as e:
             self.end()
-            print("Invalid Syntax")
+            print("MessageSyntaxException")
         except ServerKeyOutOfRangeException:
             self.end()
             print("ServerKeyOutOfRangeException")
+        except LoginFailedException:
+            self.end()
+            print("LoginFailedException")
 
     def end(self):
         self.connection.close()
@@ -122,11 +127,13 @@ if __name__ == "__main__":
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listening = ('localhost', 4444)
     server.bind(listening)
-    server.listen(5) # become a server socket, maximum 5 connections
 
-    c = Client(server)
+    threads = []
+    while True:
+        c = Client(server)
+        c.start()
+        threads.append(c)
 
-    c.start()
-
-    c.join()
+    for t in threads:
+        t.join()
 
