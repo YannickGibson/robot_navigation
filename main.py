@@ -1,12 +1,18 @@
 import socketserver, socket
 from time import sleep
 from threading import Thread
+from enum import Enum
 
 TIMEOUT = 1
 TIMEOUT_RECHARGING = 5
 SERVER_KEYS = [23019, 32037, 18789, 16443, 18189]
 CLIENT_KEYS = [32037, 29295, 13603, 29533, 21952]
 
+class DIRECTION(Enum):
+    UP = 1
+    DOWN = 2
+    LEFT = 3
+    RIGHT = 4
 class MessageSyntaxException(Exception):
     pass
 class ServerKeyOutOfRangeException(Exception):
@@ -22,14 +28,18 @@ class Client(Thread): # Extend Thread class
         self.connection.settimeout(TIMEOUT)
         self.name = ""
         self.thread_active = True
+        self.prevx = -69
+        self.prevy = -69
+        self.dir = -69
 
     def read(self):
-        txt = self.connection.recv(200).decode()
+        _txt = self.connection.recv(200).decode()
+        txt = _txt
         messages = []
         while True:
             prefix, ab, suffix = txt.partition("\a\b")
             if ab != "\a\b":
-                raise MessageSyntaxException("INVALID ENDING SEQUENCE")
+                raise MessageSyntaxException(f"INVALID ENDING SEQUENCE: '{_txt}',\n Part: '{txt}'")
             messages.append(prefix)
             txt = suffix
             if suffix == "":
@@ -87,11 +97,38 @@ class Client(Thread): # Extend Thread class
                 raise LoginFailedException()
 
     def act(self, msg):
-        if msg == "OK 0 0":
-            self.send("105 GET MESSAGE")
-            self.send("106 LOGOUT")
-            self.end()
-            return
+        if msg[:2] == "OK":
+            x, y = (int(x) for x in msg[3:].split(" "))
+            if x == 0 and y == 0:
+                self.send("105 GET MESSAGE")
+                self.send("106 LOGOUT")
+                self.end()
+            elif self.prevx == -69 and self.prevy == -69:
+                self.send("102 MOVE")
+
+            elif self.dir == -69: # we had moved previously
+                if self.prevx == x and self.prevy == y:
+                    pass # obstacle 
+                else:
+                    if x > self.prevx: 
+                        self.dir = DIRECTION.RIGHT
+                    elif x < self.prevx:
+                        self.dir = DIRECTION.LEFT
+                    if x > self.prevy: 
+                        self.dir = DIRECTION.UP
+                    elif x < self.prevy:
+                        self.dir = DIRECTION.DOWN
+
+                self.send("102 MOVE")
+            else:
+                if self.dir == DIRECTION.DOWN:
+                    if abs(y) >= abs(x):
+                        self.send("102 MOVE")
+                    else:
+                        pass
+
+            self.prevx = x
+            self.prevy = y
         else:
             pass
 
