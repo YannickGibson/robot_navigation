@@ -3,10 +3,17 @@ from time import sleep
 from threading import Thread
 from enum import Enum
 
-TIMEOUT = 1
-TIMEOUT_RECHARGING = 5
+# My Constants
+SOCKET_TIMEOUT = 5
+
+# Validation Constants
 SERVER_KEYS = [23019, 32037, 18789, 16443, 18189]
 CLIENT_KEYS = [32037, 29295, 13603, 29533, 21952]
+TIMEOUT = 1
+CLIENT_OK = 12
+CLIENT_USERNAME = 20
+CLIENT_MESSAGE = 100
+TIMEOUT_RECHARGING = 5
 
 class DIRECTION(Enum):
     UP = 1
@@ -19,11 +26,12 @@ class ServerKeyOutOfRangeException(Exception):
     pass
 class LoginFailedException(Exception):
     pass
+class LogicException(Exception):
+    pass
 
 class Client(Thread): # Extend Thread class
     def __init__(self, soc):
         super().__init__()
-        soc.listen(TIMEOUT)
         self.connection, _ = soc.accept()
         self.connection.settimeout(TIMEOUT)
         self.name = ""
@@ -34,18 +42,43 @@ class Client(Thread): # Extend Thread class
         self.x = -69
         self.y = -69
         self.messages = []
+        self.auth_process = 0
+        self.charging = False
+        self.turning = False
+
 
     def move(self):
         print("Moving")
         self.send("102 MOVE")
-    def read(self):
+    def read(self, maxCharacters = 200):
         _txt = ""
         while _txt[-2:] != "\a\b":
             _txt += self.connection.recv(200).decode()
+            if self.auth_process == 0: # username
+                if _txt.count("\a\b") == 0 and len(_txt) > CLIENT_USERNAME - 2:
+                    raise MessageSyntaxException("Username too short")
+                self.auth_process += 1
+
+            elif self.auth_process == 5: # moving (client_ok)
+                # it is only going to be position commands, they cannot precache "secret" answer
+                individual_pos = _txt.split("\a\b")
+                for pos in individual_pos:
+                    if len(pos) > CLIENT_OK - 2:
+                        raise MessageSyntaxException("Max move length")
+
+            elif self.auth_process == 10: # secret
+                if _txt.count("\a\b") == 0 and len(_txt) > CLIENT_MESSAGE - 2:
+                    raise MessageSyntaxException("Secret length")
         txt = _txt
         messages = []
         while True:
             prefix, ab, suffix = txt.partition("\a\b")
+            """ 
+            if self.auth_process >= 0:
+                if self.auth_process == 0 and len(prefix) > 20 - 2: """
+
+                      
+                
             if ab != "\a\b":
                 raise MessageSyntaxException(f"INVALID ENDING SEQUENCE: '{_txt}',\n Part: '{txt}'")
             messages.append(prefix)
@@ -75,8 +108,7 @@ class Client(Thread): # Extend Thread class
             print(self.messages)
             while len(self.messages) > 0:
                 msg = self.messages.pop(0)
-                self._initial_act(msg, order = i)
-                i += 1
+                i = self._initial_act(msg, order = i)
                 if i >= max_iter:
                     break 
             if i >= max_iter:
@@ -85,11 +117,25 @@ class Client(Thread): # Extend Thread class
         self.move()
 
     def _initial_act(self, msg, order):
-        if order == 0:
+
+        if msg == "RECHARGING":
+            print("Charging...")
+            self.connection.settimeout(TIMEOUT_RECHARGING)
+            self.charging = True
+            return order
+            
+        elif msg == "FULL POWER":
+            if self.charging == False:
+                raise LogicException("Robot said hes fully charged without telling he needs to be recharged")
+            print("Fully Charged!")
+            self.connection.settimeout(TIMEOUT)
+            self.charging = False
+            return order
+        elif order == 0:
             if len(msg) > 20 - 2: raise MessageSyntaxException()
             self.name = msg
             self.send("107 KEY REQUEST")
-        if order == 1:
+        elif order == 1:
             try:
                 self.keyid = int(msg)
             except ValueError:
@@ -97,7 +143,6 @@ class Client(Thread): # Extend Thread class
 
             if self.keyid < 0 or self.keyid > len(SERVER_KEYS) - 1:
                 print(self.keyid)
-                self.send("303 KEY OUT OF RANGE")
                 raise ServerKeyOutOfRangeException()	
             name_hash = self.get_asci_hash()
             mutual_hash = name_hash * 1000 % 65536
@@ -105,22 +150,33 @@ class Client(Thread): # Extend Thread class
             self.client_hash = str((mutual_hash + CLIENT_KEYS[self.keyid]) % 65536)
 
             self.send(self.server_hash)
-        if order == 2:
+        elif order == 2:
             client_sent_hash = msg
             if self.client_hash == client_sent_hash:
                 self.send("200 OK")
+                self.auth_process = 5
             else:
-                
                 # Are all characters numbers?
                 for c in client_sent_hash:
                     if c < '0' or c > '9':
-                        raise MessageSyntaxException()
-                    
+                        raise MessageSyntaxException("sent hash is not a number")
+                
+                if int(client_sent_hash) > 65536: raise MessageSyntaxException("Client hash too big")
+
+                # 
                 raise LoginFailedException()
 
-    
+        return order + 1
     def act(self, msg):
-        if msg[:2] == "OK":
+        if msg == "RECHARGING":
+            print("Charging...")
+            self.connection.settimeout(TIMEOUT_RECHARGING)
+            self.charging = True
+        elif msg == "FULL POWER":
+            print("Fully Charged!")
+            self.connection.settimeout(TIMEOUT)
+            self.charging = False
+        elif msg[:2] == "OK":
             try:
                 x, y = (int(x) for x in msg[3:].split(" "))
             except ValueError:
@@ -128,15 +184,19 @@ class Client(Thread): # Extend Thread class
 
             self.x = x
             self.y = y
-            print(">>", x,y, self.dir)
+            print(">>", x,y, self.dir, self.messages)
 
             if x == 0 and y == 0:
-                print("ending messages:", self.messages)
+                #print("ending messages:", self.messages)
                 self.send("105 GET MESSAGE")
+                self.auth_process = 10
                 if len(self.messages) == 0:
                     self.read()
                 msg = self.messages.pop(0)
-                print("secret:", msg)
+                if msg == "RECHARGING":
+                    raise LogicException("Robot said hes fully charged without telling he needs to be recharged")
+                    
+                print("Secret:", msg)
                 self.send("106 LOGOUT")
                 self.end()
             elif self.prevx == -69 and self.prevy == -69:
@@ -144,7 +204,8 @@ class Client(Thread): # Extend Thread class
 
             else:
                 if self.dir == -69: # we had moved previously
-                    if self.prevx == x and self.prevy == y:
+                    if self.prevx == x and self.prevy == y and self.turning == False:
+                        self.turning = False
                         print("Initial OBSTACLE!!!")
                         self.turn_right()
                         self.move()
@@ -161,7 +222,8 @@ class Client(Thread): # Extend Thread class
                             self.dir = DIRECTION.DOWN
                 
                         print("direction sellected", self.dir) 
-                if self.prevx == x and self.prevy == y:
+                if self.prevx == x and self.prevy == y and self.turning == False:
+                    self.turning = False
                     print("OBSTACLE!!!")
                     if self.dir == DIRECTION.RIGHT:
                         if  y > 0:
@@ -237,6 +299,9 @@ class Client(Thread): # Extend Thread class
             # other actions
             pass
 
+        self.turning = False
+
+
     def turn_right(self):
         print("Turning Right")
         self.send("104 TURN RIGHT")        
@@ -251,20 +316,31 @@ class Client(Thread): # Extend Thread class
         # redundant info about position
         if len(self.messages) == 0:
             self.read() # read ok statement
-        self.messages.pop(0) # don't need it its the same info
+        msg = self.messages.pop(0) # don't need it its the same info
+
+        if msg == "RECHARGING":
+            print("Charging [TURN]...", [msg] + self.messages)
+            self.connection.settimeout(TIMEOUT_RECHARGING)
+            if len(self.messages) == 0:
+                self.read()
+            msg = self.messages.pop(0) # don't need it just recharging
+            print("Charging msg:", msg)
+            self.connection.settimeout(TIMEOUT)
+
+            if len(self.messages) == 0:
+                self.read()
+            self.messages.pop(0) # current position message
         
     def turn_to(self, direction): # CONTINUAL ROTATION TO THE RIGHT
+        self.turning = True
         if direction == self.dir:
-            print("turned correctly: ", self.dir)
+            print("Turned correctly: ", self.dir)
             # adding last essages for us to work on, because client aint goint to send us anything
             self.move()
-            #self.messages = [f'OK {self.x} {self.y}'] + self.messages
-
             #print(self.messages)
-            #self.act(f'OK {self.x} {self.y}')
             return
         
-        print("( To:", direction, ")", end=" ")
+        print("( To:", direction, "| from:", self.dir, ")", end=" ")
         self.turn_right()
         
 
@@ -283,20 +359,20 @@ class Client(Thread): # Extend Thread class
                     self.act(msg)
 
         except socketserver.socket.timeout as e: #Toto se bude hodit později :)
-            self.end()
             print("Connection Killed by us: Connection Timeout", e)
         except MessageSyntaxException as e:
             self.send("301 SYNTAX ERROR")
-            self.end()
-            print("MessageSyntaxException")
+            print("MessageSyntaxException", e)
         except ServerKeyOutOfRangeException:
             self.send("303 KEY OUT OF RANGE")
-            self.end()
             print("ServerKeyOutOfRangeException")
         except LoginFailedException:
             self.send("300 LOGIN FAILED")
-            self.end()
             print("LoginFailedException")
+        except LogicException as e:
+            self.send("302 LOGIC ERROR")
+            print("LogicException", e)
+        self.end()
 
     def end(self):
         self.connection.close()
@@ -310,12 +386,23 @@ if __name__ == "__main__":
     listening = ('localhost', 4444)
     server.bind(listening)
 
+    # Useful for testing reasons
+    #server.settimeout(SOCKET_TIMEOUT)
+
     threads = []
-    for i in range(888888):
-        c = Client(server)
+    server.listen(5)
+    for i in range(4444):
+
+        try:
+            c = Client(server)
+        except:
+            print("[Timeout]: Socket closed for new connections.")
+            break
+
         c.start()
         threads.append(c)
 
+    # Let main thread wait for main thread
     for t in threads:
         t.join()
 
